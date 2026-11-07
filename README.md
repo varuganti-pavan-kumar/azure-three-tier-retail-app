@@ -4,7 +4,7 @@ A cloud engineering portfolio project demonstrating a private three-tier retail 
 
 The project includes a web tier, Python API tier, Azure Database for PostgreSQL, managed identity, Azure Key Vault, private networking, and Terraform infrastructure definitions.
 
-> **Current status:** The application has been deployed and tested across the private Azure network. High availability (HA) is not yet implemented or demonstrated. The Nginx-hosted website is not currently exposed to the public internet.
+**Project status:** The initial application implementation has been deployed and tested across the private Azure network. High availability (HA) is not yet implemented or demonstrated. The Nginx-hosted website is not currently exposed to the public internet.
 
 ## 1. Architecture
 

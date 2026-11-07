@@ -1,4 +1,4 @@
-# Architecture Decisions
+# Architecture Decisions – HA Retail Azure Three-Tier Application
 
 This document records the main architecture choices for the HA Retail Azure project, why they were made, and their current limitations.
 
