@@ -1,391 +1,179 @@
-# Architecture Decisions — Azure Three-Tier Retail Platform
+# Architecture Decisions
 
-**Last updated:** 25 October 2026
+This document records the main architecture choices for the HA Retail Azure project, why they were made, and their current limitations.
 
-## 1. Purpose
+**Last updated:** 7 November 2026
 
-This document records the architecture decisions for the Azure retail platform, including the rationale, alternatives, trade-offs, and validation evidence.
+## Decision 1: Use a three-tier application design
 
-The target architecture separates presentation, application logic, and persistent data into three tiers. Supporting Azure services provide infrastructure automation, network controls, identity-based authorization, secrets management, and delivery automation.
+**Decision:** Separate the storefront, application API, and database into distinct tiers.
 
-A decision being documented does not necessarily mean its full implementation or end-to-end behavior has been verified. Each decision includes its current implementation status where relevant.
+**Implementation:**
+- Web tier: Nginx on the web VM in South India.
+- Application tier: Python API on the app VM in South India.
+- Data tier: Azure Database for PostgreSQL Flexible Server in UK South.
 
-## 2. Architecture Overview
+**Reason:** Separating these responsibilities makes the system easier to understand, secure, troubleshoot, and extend.
 
-### Target architecture
+**Trade-off:** Separate VMs and cross-region database connectivity add infrastructure and networking complexity and can increase cost and latency.
 
-```mermaid
-flowchart TB
-    User["Customer / Browser"]
-    Static["Azure Static Web Apps<br/>Retail storefront"]
-    Web["Web Tier<br/>Nginx on Ubuntu VM<br/>South India · 10.0.2.4"]
-    App["Application Tier<br/>Ubuntu VM<br/>South India · 10.0.3.4"]
-    DB["Data Tier<br/>Azure PostgreSQL Flexible Server<br/>UK South · 10.1.1.4"]
-    KV["Azure Key Vault<br/>RBAC + managed identity"]
-    TF["Terraform"]
-    Git["GitHub + GitHub Actions"]
+**Status:** Deployed and tested over the private network.
 
-    User --> Static
-    User --> Web
-    Web -->|"Intended TCP 8080<br/>end-to-end validation pending"| App
-    App -->|"Private network<br/>TCP 5432 reachable"| DB
-    App -.->|"Diagnostic secret retrieval verified"| KV
-    TF -.-> Web
-    TF -.-> App
-    TF -.-> DB
-    Git -.-> Static
-```
+## Decision 2: Use Nginx as the web server and reverse proxy
 
-The diagram shows the target request path and the supporting infrastructure. It does not assert that the complete retail application flow is operational.
+**Decision:** Serve the storefront through Nginx and forward API requests to the app VM.
 
-### Deployed network layout
+**Implementation:**
+- Storefront files are served from `/var/www/html`.
+- `/api/` is forwarded to `10.0.3.4:8080`.
+- `/health` is forwarded to the API health endpoint.
 
-**South India**
+**Reason:** The browser can use a single web origin for the storefront and API paths. The app VM does not need to serve the static website.
 
-- Virtual network: `ha-retail-vnet`
-- Address space: `10.0.0.0/16`
-- Reserved Application Gateway subnet: `10.0.1.0/24`
-- Web subnet: `10.0.2.0/24`
-- Application subnet: `10.0.3.0/24`
-- Web VM: `ha-retail-southindia-web-vm`, `10.0.2.4`
-- Application VM: `ha-retail-southindia-app-vm`, `10.0.3.4`
+**Trade-off:** Nginx configuration and the web VM become important parts of the request path.
 
-**UK South**
+**Status:** Deployed and tested. Homepage, health, and product API requests returned HTTP 200 through Nginx.
 
-- Database virtual network: `ha-retail-southindia-postgresql-vnet`
-- Address space: `10.1.0.0/16`
-- Delegated database subnet: `10.1.1.0/24`
-- PostgreSQL server: `ha-retail-southindia-pg`
-- Private IP observed during validation: `10.1.1.4`
+## Decision 3: Keep the application VMs in private subnets
 
-VNet peering and private DNS provide the intended cross-region connectivity between the application environment and PostgreSQL.
+**Decision:** Do not assign public IP addresses to the web and app VMs.
 
-## 3. Core Decision: Three-Tier Architecture
+**Implementation:**
+- Web subnet: `10.0.2.0/24`.
+- App subnet: `10.0.3.0/24`.
+- Web VM private IP: `10.0.2.4`.
+- App VM private IP: `10.0.3.4`.
+- The app VM accepts TCP port `8080` from the web subnet.
 
-**Status:** Adopted as the target architecture; end-to-end application integration remains incomplete.
+**Reason:** Private addressing reduces direct exposure of the virtual machines to the public internet.
 
-### Context
+**Trade-off:** Access to the VM-hosted website requires an authorized private network path. Public internet access is not currently configured.
 
-Combining presentation, application logic, and database responsibilities on one server can simplify an initial deployment, but it couples the components and makes network isolation, independent scaling, and troubleshooting more difficult.
+**Status:** Implemented. Neither VM has a public IP.
 
-The project needs to demonstrate the design and validation of realistic cloud infrastructure, not simply the deployment of a single VM.
+## Decision 4: Use PostgreSQL Flexible Server in a separate region and VNet
 
-### Decision
+**Decision:** Place the database in UK South, separate from the application VNet in South India.
 
-Separate the platform into three logical tiers:
+**Implementation:**
+- PostgreSQL Flexible Server: `ha-retail-southindia-pg`.
+- PostgreSQL version: 18.
+- Database: `retaildb`.
+- PostgreSQL VNet: `ha-retail-southindia-postgresql-vnet`.
+- PostgreSQL VNet address space: `10.1.0.0/16`.
+- Delegated subnet: `10.1.1.0/24`.
+- Observed private IP: `10.1.1.4`.
+- VNet peering and private DNS provide private connectivity and name resolution.
 
-1. **Presentation tier:** Serves the retail interface and handles incoming user-facing requests.
-2. **Application tier:** Hosts business logic and mediates access to application data.
-3. **Data tier:** Stores persistent retail data in PostgreSQL.
+**Reason:** This demonstrates private connectivity between separately addressed Azure virtual networks and regions.
 
-The current implementation uses Azure Static Web Apps for the storefront, a separate Nginx web VM, an application VM, and Azure Database for PostgreSQL Flexible Server.
+**Trade-off:** Cross-region connectivity adds latency and networking dependencies. A separate region does not automatically provide application high availability or disaster recovery.
 
-### Rationale
+**Status:** Deployed and tested. PostgreSQL public access is disabled. The server uses a delegated subnet, not a Private Endpoint.
 
-- Establishes clear responsibilities and network boundaries.
-- Allows different access policies to be applied to each tier.
-- Supports independent resource sizing and potential scaling.
-- Makes troubleshooting easier by isolating presentation, application, and database failures.
-- Provides a foundation for future redundancy and availability improvements.
+## Decision 5: Use managed identity and Key Vault for database credentials
 
-### Alternatives considered
+**Decision:** Do not store the PostgreSQL password in application source code or the server-side environment file.
 
-**Single-tier deployment:** Put the web server, application, and database on one machine.
+**Implementation:**
+- The app VM uses a system-assigned managed identity.
+- The identity has the `Key Vault Secrets User` role at the vault scope.
+- The API retrieves `retailapp-db-password` from Key Vault.
+- The API connects to PostgreSQL using SSL.
 
-- Advantage: Fewer resources and less initial configuration.
-- Disadvantage: Greater coupling, weaker separation of access boundaries, and limited independent scaling.
+**Reason:** Managed identity avoids putting a separate Azure credential in the application configuration. Key Vault provides a central place to manage the database password.
 
-**Two-tier deployment:** Combine the web and application responsibilities or combine application and data responsibilities.
+**Trade-off:** The API needs permission and network connectivity to Key Vault during startup. If secret retrieval fails, API startup fails.
 
-- Advantage: Potentially lower infrastructure and operational overhead.
-- Disadvantage: Less separation between responsibilities and fewer opportunities to practise distinct tier-level network controls.
+**Network detail:** Key Vault public network access is restricted using a default-deny firewall and an app-subnet service endpoint/VNet rule. This is not a Private Endpoint configuration.
 
-### Trade-offs
+**Status:** Implemented and tested.
 
-Three tiers introduce additional infrastructure cost, network dependencies, DNS requirements, and operational complexity. They do not guarantee high availability by themselves. Redundancy, health checks, traffic management, recovery procedures, and tested failover are still required.
+## Decision 6: Use a dedicated PostgreSQL application login
 
-## 4. Decision: Separate Web and Application Subnets
+**Decision:** The API connects using the `retailapp` database login rather than a general administrator login.
 
-**Status:** Implemented; intended web-to-application traffic validation pending.
+**Implementation:**
+- Database: `retaildb`.
+- Schema: `app`.
+- Application table: `app.products`.
+- The application login has the required schema and database permissions.
 
-### Context
+**Reason:** A dedicated login separates application access from administrative database access.
 
-The web-facing component and the application workload have different network access requirements. The application service should not need unrestricted access from arbitrary sources.
+**Trade-off:** The login's permissions must be maintained as the application changes.
 
-### Decision
+**Status:** Implemented and tested.
 
-Use separate subnets within `ha-retail-vnet`:
+## Decision 7: Store sample product records in PostgreSQL
 
-- Web: `10.0.2.0/24`
-- Application: `10.0.3.0/24`
+**Decision:** The API reads product records from the database instead of returning a hardcoded response.
 
-Configure the application network security group to allow inbound TCP 8080 from the web subnet.
+**Implementation:**
+- The API creates `app.products` if it does not exist.
+- It inserts three sample products using `ON CONFLICT DO NOTHING`.
+- The `/api/products` endpoint queries the table.
 
-### Rationale
+**Reason:** This demonstrates an actual application-to-database data path while keeping the initial demo easy to reproduce.
 
-- Limits application-tier ingress to the intended web network.
-- Establishes a clear trust boundary between the web and application workloads.
-- Makes network policy easier to review and troubleshoot.
-- Reduces unnecessary exposure compared with broad inbound rules.
+**Trade-off:** The sample data is not a real retail catalogue, and startup performs basic database initialization.
 
-### Alternatives considered
+**Status:** Implemented and tested. The API returned three sample records with `source` set to `postgresql`.
 
-**Single shared subnet:** Simpler addressing and fewer subnet-level distinctions, but less explicit separation of tier network boundaries.
+## Decision 8: Use systemd to manage the API process
 
-**Broad application ingress:** Easier to test initially, but permits unnecessary sources and weakens the intended security policy.
+**Decision:** Run the Python API as a Linux systemd service.
 
-### Validation and limitations
+**Implementation:**
+- Service: `ha-retail-api.service`.
+- Service user: `ha-retail-api`.
+- Port: `8080`.
+- The service restarts after an unexpected failure.
 
-An HTTP request from the application VM to the web VM returned HTTP 200. This is evidence of application-to-web connectivity only; it does not prove web-to-application connectivity.
+**Reason:** systemd provides service startup, restart handling, and status inspection without requiring a terminal session to remain open.
 
-The next step is to confirm that an application service is listening on TCP 8080 and then test the intended direction from the web VM.
+**Trade-off:** systemd restart handling does not provide multiple instances or automatic failover.
 
-## 5. Decision: Use Azure Database for PostgreSQL Flexible Server
+**Status:** Production service active and enabled. The temporary test service on port `8081` is stopped and disabled.
 
-**Status:** Database deployed; network validation passed; authentication and query validation pending.
+## Decision 9: Keep separate Terraform configuration directories
 
-### Context
+**Decision:** Retain both `terraform/` and `terraform-southindia/` in the repository.
 
-The retail platform requires persistent relational storage. The database should be separate from the application compute and should not be exposed directly to public clients.
+**Reason:** The repository contains more than one infrastructure configuration, allowing the project to retain its earlier and region-specific infrastructure definitions.
 
-### Decision
+**Trade-off:** Separate configurations can cause confusion if the wrong directory or state is used.
 
-Deploy Azure Database for PostgreSQL Flexible Server in UK South, using a delegated subnet in a separate virtual network. Connect the South India application environment through VNet peering and private DNS.
+**Operational rule:** Inspect the Terraform files, variables, backend configuration, and state before running `plan`, `apply`, or `destroy`. Never assume the directories share state.
 
-### Rationale
+**Status:** Both directories are present in the repository. Their exact deployment relationship should be reviewed before future infrastructure changes.
 
-- Separates database administration and persistence from application compute.
-- Uses a managed database service instead of requiring the project to administer a PostgreSQL server on a VM.
-- Avoids public database access for the deployed configuration.
-- Provides an opportunity to validate private DNS and cross-region network connectivity.
+## Decision 10: Keep public ingress and high availability as future work
 
-### Alternatives considered
+**Decision:** Do not claim that the current private VM deployment is publicly reachable or highly available.
 
-**PostgreSQL on a VM:** Offers more operating-system and database-level control, but requires more responsibility for maintenance, patching, backups, and availability.
+**Current implementation:**
+- No public IP was found for either VM.
+- No Application Gateway was found in the resource group.
+- The tested Nginx storefront is private.
+- The application has one web VM and one API VM.
+- No automatic failover has been demonstrated.
 
-**Public database endpoint:** May simplify initial connectivity but would increase exposure and conflict with the project's private-networking objective.
+**Reason:** This documents the actual deployed system instead of describing planned architecture as completed work.
 
-**Private Endpoint:** Provides a different private connectivity model, but it was not the approach deployed for the current database.
+**Trade-off:** The current deployment is not publicly accessible through the VM-hosted storefront and has single-instance failure points.
 
-### Validation
+**Future work:**
+- Multiple API instances.
+- A load balancer and health probes.
+- Redundant web and application infrastructure.
+- Database backup and restore testing.
+- Monitoring, alerting, and disaster recovery tests.
 
-- Database hostname resolves to private IP `10.1.1.4` from the application environment.
-- TCP port 5432 is reachable from that environment.
-- PostgreSQL authentication and an SQL query have not yet been verified.
+**Status:** High availability and public ingress are not implemented.
 
-Private DNS resolution and TCP reachability do not establish that the database credentials or SQL operations work.
+## Summary
 
-## 6. Decision: Terraform for Infrastructure as Code
+The project demonstrates a private three-tier Azure application with a working Nginx-to-Python-to-PostgreSQL request path, managed identity, Key Vault secret retrieval, private networking, and Terraform configuration.
 
-**Status:** Adopted; current deployment configuration maintained in `terraform-southindia/`.
-
-### Context
-
-Manual portal-based deployment alone is difficult to reproduce and review. Infrastructure changes need to be recorded and applied consistently.
-
-### Decision
-
-Use Terraform to define and reconcile Azure infrastructure, with the current South India deployment configuration maintained in `terraform-southindia/`.
-
-### Rationale
-
-- Makes infrastructure definitions reviewable in source control.
-- Supports repeatable deployment and change planning.
-- Helps identify configuration drift.
-- Provides a consistent record of resource configuration and dependencies.
-
-### Alternatives considered
-
-**Manual Azure portal deployment:** Useful for exploration and troubleshooting, but less reproducible and harder to review systematically.
-
-**Azure Bicep:** A strong Azure-native alternative with first-class Azure resource support. Terraform was selected for this project to practise Terraform-based infrastructure management.
-
-### Operational safeguards
-
-The repository contains both `terraform/` and `terraform-southindia/`. Before applying changes:
-
-1. Confirm the correct working directory.
-2. Confirm the Azure subscription and target resources.
-3. Inspect the Terraform backend and state configuration.
-4. Run `terraform plan` and review proposed changes.
-5. Apply only after confirming the plan targets the intended environment.
-
-Do not assume the two Terraform directories share the same state or manage identical resources.
-
-## 7. Decision: Managed Identity and Key Vault for Secrets
-
-**Status:** Identity-based diagnostic secret retrieval verified; application integration pending.
-
-### Context
-
-Embedding credentials in application source, scripts, or configuration files creates risks of accidental disclosure and difficult credential rotation.
-
-### Decision
-
-Use Azure Key Vault for secret storage and the application VM's system-assigned managed identity for authentication.
-
-The application VM has the `Key Vault Secrets User` role at vault scope. Azure RBAC authorizes secret access.
-
-### Network design
-
-The vault uses a public endpoint protected by firewall rules:
-
-- Firewall default action: `Deny`.
-- Application subnet allowed through a virtual network rule.
-- `Microsoft.KeyVault` service endpoint enabled on the application subnet.
-- Public network access remains enabled at the service level, with the firewall restricting permitted network access.
-- A Private Endpoint is not deployed.
-
-### Rationale
-
-- Avoids storing an Azure client secret on the VM solely to authenticate to Key Vault.
-- Provides a centralized place to manage application secrets.
-- Separates network access controls from identity-based authorization.
-- Allows access to be restricted to the required identity and vault permissions.
-
-### Alternatives considered
-
-**Hard-coded secret:** Simple initially but risks disclosure and makes rotation harder.
-
-**Stored service-principal credentials:** Can support automation, but require the credentials themselves to be protected and rotated.
-
-**Private Endpoint:** An alternative for private IP-based connectivity to Key Vault. It was not selected for the current implementation; the deployed design uses a service endpoint and Key Vault firewall.
-
-### Validation evidence
-
-On 25 October 2026:
-
-- The application VM acquired a managed identity token.
-- A diagnostic operation retrieved the `connectivity-test` secret.
-- The request returned HTTP 200 and `SECRET_RETRIEVAL=SUCCESS`.
-- The test validated the expected result without printing the secret value.
-- The temporary `Key Vault Secrets Officer` role assignment was removed and checked in the subsequent role listing.
-
-The temporary assignment's removal was verified. The remaining role listing showed the inherited subscription `Owner` role and the application's `Key Vault Secrets User` role.
-
-### Limitations
-
-The diagnostic test proves identity-based secret retrieval from the VM, not that the retail application consumes the secret. Application integration and application-level error handling remain pending.
-
-## 8. Decision: Cross-Region Network Connectivity
-
-**Status:** VNet peering and database connectivity checks verified; full database operation pending.
-
-### Context
-
-The application workloads are deployed in South India, while the PostgreSQL server is deployed in UK South. The application needs a network path to the database without exposing the database to public clients.
-
-### Decision
-
-Use VNet peering between the South India and UK South networks, with private DNS configured for database hostname resolution.
-
-### Rationale
-
-- Provides private network connectivity between the environments.
-- Allows the application to use the database hostname rather than relying on a hard-coded IP address.
-- Demonstrates cross-region network design and DNS troubleshooting.
-
-### Trade-offs
-
-Cross-region networking introduces additional latency and networking costs compared with co-locating the application and database. It also introduces dependencies on peering, DNS, routing, and firewall configuration.
-
-### Validation
-
-Database hostname resolution and TCP 5432 reachability have been confirmed from the application environment. Authentication, SQL execution, application integration, and performance measurements remain outstanding.
-
-## 9. Decision: Azure Static Web Apps and GitHub Actions
-
-**Status:** Storefront hosting and existing delivery workflow established.
-
-### Context
-
-The storefront should be deliverable from source control without requiring every frontend release to be tied to a VM configuration change.
-
-### Decision
-
-Maintain storefront source in `website/`, host it on Azure Static Web Apps, and use GitHub Actions for the existing delivery workflow.
-
-### Rationale
-
-- Separates static storefront delivery from VM-based infrastructure.
-- Supports source-controlled changes and automated deployment.
-- Reduces the need to serve all static assets directly from a VM.
-
-### Trade-offs and limitations
-
-The hosted storefront and Nginx web VM are separate presentation-related components. Their intended relationship with the application tier still needs end-to-end validation.
-
-Static Web Apps hosting and a working delivery workflow do not, by themselves, demonstrate that the backend request flow is operational.
-
-## 10. Decision: Defer High-Availability Claims Until Validated
-
-**Status:** High availability not yet implemented end to end.
-
-### Context
-
-The project is intended to demonstrate a highly available retail platform, but the current infrastructure does not yet prove redundant application serving or tested failover.
-
-### Decision
-
-Treat high availability as a future implementation milestone rather than a completed property of the current deployment.
-
-A future design should evaluate:
-
-- Application Gateway or another suitable traffic-distribution mechanism.
-- Multiple appropriate backend instances or other required redundancy.
-- Health probes and backend health management.
-- Failure scenarios and recovery behavior.
-- Database backup and recovery objectives.
-- Monitoring and alerting.
-
-### Rationale
-
-A three-tier architecture separates responsibilities, but three tiers alone do not ensure that any tier can survive a failure. Availability claims need evidence from the deployed topology and tests.
-
-### Current limitation
-
-The subnet `10.0.1.0/24` is reserved for a potential Application Gateway. An Application Gateway has not been deployed as part of the current validated state.
-
-## 11. Validation Record
-
-| Area | Observed result | Remaining work |
-|---|---|---|
-| Web server | Nginx returned HTTP 200 locally | Verify complete request path |
-| VM network path | App VM → web VM returned HTTP 200 | Verify web VM → app VM |
-| Application service | TCP 8080 ingress rule configured | Confirm service listener and HTTP response |
-| Database DNS | Private IP resolution verified | Test authenticated connection |
-| Database network | TCP 5432 reachable | Execute SQL query |
-| Key Vault identity | Secret retrieval succeeded | Integrate with application |
-| Key Vault network | Default-deny and subnet rule verified | Continue periodic access review |
-| Terraform | Current infrastructure configuration deployed | Maintain safe plan/apply workflow |
-| Storefront CI/CD | Existing delivery workflow established | Validate end-to-end application integration |
-| High availability | Not implemented end to end | Deploy and test redundancy and failover |
-
-## 12. Security and Operational Principles
-
-- Use least-privilege RBAC roles and review inherited permissions as well as direct assignments.
-- Keep database public access disabled unless a reviewed architectural change requires otherwise.
-- Restrict tier-to-tier traffic to the sources and ports required.
-- Avoid committing credentials, private keys, secret values, or sensitive Terraform state.
-- Do not print secrets in logs or diagnostic output.
-- Validate both identity authorization and network reachability when troubleshooting access.
-- Review Terraform plans before applying infrastructure changes.
-- Monitor resource state and cost; stopping or deallocating compute does not necessarily eliminate all associated charges.
-- Distinguish successful infrastructure checks from successful application behavior.
-
-## 13. Outstanding Decisions and Work
-
-1. Confirm the application framework and deploy a service that listens on the intended application port.
-2. Validate web-to-application traffic and record the result.
-3. Test PostgreSQL authentication and SQL execution.
-4. Integrate application secret retrieval with Key Vault managed identity.
-5. Demonstrate an end-to-end retail request.
-6. Select and implement the appropriate high-availability topology.
-7. Define monitoring, backup, recovery, and failover tests.
-8. Revisit cross-region placement and latency/cost trade-offs after measuring application behavior.
-
-## Conclusion
-
-The current design establishes a three-tier Azure architecture with separate web and application subnets, a privately networked cross-region PostgreSQL database, Terraform-managed infrastructure, and identity-based Key Vault access.
-
-The architecture choices are intended to improve separation of concerns, network security, maintainability, and future scalability. The remaining work is to validate application behavior across the tiers and implement the redundancy and recovery measures required before describing the platform as fully operational and highly available.
+It should currently be described as a **private three-tier Azure application demo**, not as a completed high-availability or public-facing production system.

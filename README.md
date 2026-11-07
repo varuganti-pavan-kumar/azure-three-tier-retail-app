@@ -1,268 +1,277 @@
-# High-Availability Retail Platform on Azure
+# HA Retail – Azure Three-Tier Retail Application
 
-A cloud engineering project demonstrating how to design, deploy, secure, and validate a three-tier retail platform using Microsoft Azure, Terraform, Linux virtual machines, managed identities, Azure Key Vault, and Azure Database for PostgreSQL.
+A cloud engineering portfolio project demonstrating a private three-tier retail application on Microsoft Azure.
 
-**Project status:** Core infrastructure is deployed. The demo API is running on the application VM, web-to-application HTTP connectivity is verified, PostgreSQL authentication and a database write test succeeded, and managed-identity access to Key Vault is verified. Full retail application integration and high availability remain in progress.
+The project includes a web tier, Python API tier, Azure Database for PostgreSQL, managed identity, Azure Key Vault, private networking, and Terraform infrastructure definitions.
 
-## 1. Project Overview
+> **Current status:** The application has been deployed and tested across the private Azure network. High availability (HA) is not yet implemented or demonstrated. The Nginx-hosted website is not currently exposed to the public internet.
 
-This project demonstrates a three-tier architecture that separates presentation, application logic, and persistent data.
-
-The objectives are to practise:
-
-- Infrastructure as Code with Terraform.
-- Network segmentation and private connectivity.
-- Linux VM administration and Nginx configuration.
-- Application API deployment and troubleshooting.
-- Azure managed identities and Key Vault.
-- PostgreSQL authentication and database operations.
-- GitHub Actions and source control.
-- Security validation, monitoring, and cost management.
-
-## 2. Architecture
-
-### Three-tier design
+## 1. Architecture
 
 ```mermaid
-flowchart TB
-    Customer["Customer / Browser"]
-    Storefront["Presentation Tier<br/>Azure Static Web Apps"]
-    Web["Web Tier<br/>Ubuntu VM + Nginx<br/>10.0.2.4"]
-    App["Application Tier<br/>Ubuntu VM + Demo API<br/>10.0.3.4"]
-    DB["Data Tier<br/>Azure PostgreSQL Flexible Server<br/>UK South"]
-    KV["Azure Key Vault<br/>Managed Identity + RBAC"]
+flowchart TD
+    U["User on an authorized private network"]
+    W["Nginx Web VM<br/>South India<br/>10.0.2.4"]
+    S["Storefront<br/>HTML, CSS, JavaScript"]
+    A["Python API VM<br/>South India<br/>10.0.3.4"]
+    K["Azure Key Vault"]
+    P["Azure Database for PostgreSQL<br/>UK South<br/>Private IP 10.1.1.4"]
 
-    Customer --> Storefront
-    Customer --> Web
-    Web -->|"HTTP TCP 8080"| App
-    App -->|"PostgreSQL TCP 5432"| DB
-    App -.->|"Managed identity secret retrieval"| KV
+    U --> W
+    W --> S
+    W -->|"/api/* and /health"| A
+    A -->|"Managed identity"| K
+    K -->|"Database password"| A
+    A -->|"TLS / PostgreSQL port 5432"| P
 ```
 
-The diagram represents the intended architecture and the validated connections. The API currently returns hardcoded demo products; full retail application integration is not yet complete.
+### Request flow
 
-### Tier responsibilities
+1. Nginx on the web VM serves the storefront.
+2. The storefront requests product data from `/api/products`.
+3. Nginx forwards API requests to the Python API on the app VM.
+4. The API uses the app VM's system-assigned managed identity to retrieve the database password from Key Vault.
+5. The API connects to PostgreSQL using SSL.
+6. PostgreSQL returns product records to the API.
+7. The API returns JSON, which the storefront displays.
 
-| Tier | Responsibility | Implementation |
-|---|---|---|
-| Presentation | Deliver the storefront | Azure Static Web Apps and a separate Nginx web VM |
-| Application | Handle API requests and business logic | Ubuntu application VM running a Python demo API |
-| Data | Store persistent application data | Azure Database for PostgreSQL Flexible Server |
+The `/health` endpoint checks database connectivity as well as API availability.
 
-Azure Key Vault supports the architecture by storing secrets and controlling access through Azure RBAC and managed identity.
+## 2. Azure infrastructure
 
-### South India deployment
+| Component | Configuration |
+|---|---|
+| Main resource group | `ha-retail-southindia` |
+| Web VM | `ha-retail-southindia-web-vm` |
+| Web VM private IP | `10.0.2.4` |
+| App VM | `ha-retail-southindia-app-vm` |
+| App VM private IP | `10.0.3.4` |
+| Main virtual network | `ha-retail-vnet` |
+| Main VNet address space | `10.0.0.0/16` |
+| Web subnet | `10.0.2.0/24` |
+| App subnet | `10.0.3.0/24` |
+| PostgreSQL server | `ha-retail-southindia-pg` |
+| PostgreSQL region | UK South |
+| PostgreSQL version | 18 |
+| PostgreSQL private IP | `10.1.1.4` |
+| Database | `retaildb` |
+| Database login | `retailapp` |
 
-- Virtual network: `ha-retail-vnet` (`10.0.0.0/16`)
-- Web subnet: `10.0.2.0/24`
-- Application subnet: `10.0.3.0/24`
-- Reserved subnet: `10.0.1.0/24` for a potential Application Gateway
-- Web VM: `ha-retail-southindia-web-vm` (`10.0.2.4`)
-- Application VM: `ha-retail-southindia-app-vm` (`10.0.3.4`)
-- Key Vault: `hrkv6952055559284c2ca73a`
+The PostgreSQL server uses a separate virtual network:
 
-Both VMs use Ubuntu 22.04, SSH key authentication, and no public IP addresses.
+- VNet: `ha-retail-southindia-postgresql-vnet`
+- Address space: `10.1.0.0/16`
+- Delegated subnet: `10.1.1.0/24`
 
-### UK South database deployment
+The South India and UK South virtual networks are connected through VNet peering. Private DNS is configured for database name resolution.
 
-- PostgreSQL server: `ha-retail-southindia-pg`
-- Resource group: `ha-retail-southindia-postgresql-uksouth`
-- Database virtual network: `ha-retail-southindia-postgresql-vnet`
-- Database virtual network address space: `10.1.0.0/16`
-- Delegated database subnet: `10.1.1.0/24`
-- Private IP observed during validation: `10.1.1.4`
+PostgreSQL public access is disabled. The server uses a delegated subnet; it does not use a Private Endpoint.
+
+## 3. Application components
+
+### Storefront
+
+Source file: `website/index.html`
+
+The storefront is a responsive product page that:
+
+- Displays product cards and prices.
+- Retrieves product data from `/api/products`.
+- Shows loading and error states.
+- Formats prices as GBP currency.
+
+There are two deployment paths:
+
+**Private VM deployment**
+
+The tested storefront is served by Nginx from `/var/www/html/index.html` on the web VM.
+
+Nginx forwards:
+- `/api/` to `http://10.0.3.4:8080`
+- `/health` to the API health endpoint.
+
+**Azure Static Web Apps workflow**
+
+The repository contains `.github/workflows/azure-static-web-apps-lemon-desert-0c15a500f.yml`.
+
+This workflow is configured to deploy the `website/` directory to Azure Static Web Apps on pushes to `main`, provided the required GitHub secret is configured.
+
+This is a separate deployment path from the tested private VM deployment. The presence of the workflow alone does not prove that a successful Static Web Apps deployment is currently active.
+
+### Python API
+
+Source files:
+
+- `backend/app.py`
+- `backend/requirements.txt`
+
+The API uses:
+
+| Package | Purpose |
+|---|---|
+| `azure-identity` | Authenticate using Azure managed identity |
+| `azure-keyvault-secrets` | Retrieve the database password from Key Vault |
+| `psycopg` | Connect to PostgreSQL |
+
+The API runs as a Linux systemd service:
+
+`ha-retail-api.service`
+
+It listens on port `8080`.
+
+#### API endpoints
+
+| Endpoint | Purpose |
+|---|---|
+| `GET /health` | Checks whether PostgreSQL is reachable |
+| `GET /api/products` | Reads products from PostgreSQL and returns JSON |
+
+The API creates the `app.products` table if it does not exist. It inserts three initial sample products using `ON CONFLICT DO NOTHING`.
+
+The sample products are stored in PostgreSQL, not hardcoded into the API response.
+
+### Database
+
+- Server: `ha-retail-southindia-pg`
 - Database: `retaildb`
-- Application database login: `retailapp`
+- Schema: `app`
+- Table: `products`
+- Application login: `retailapp`
 
-VNet peering and private DNS provide the network path from the application environment to PostgreSQL. The database uses delegated-subnet networking, not a Private Endpoint.
+The API uses SSL (`sslmode=require`) for its PostgreSQL connection.
 
-## 3. Why Three-Tier Architecture?
+### Secrets management
 
-### Benefits
+The app VM uses a system-assigned managed identity to access Azure Key Vault.
 
-- **Separation of concerns:** Presentation, business logic, and data have distinct responsibilities.
-- **Security boundaries:** Each tier can have separate network and identity permissions.
-- **Independent scaling:** Components can be scaled according to their workloads.
-- **Maintainability:** Each component can be updated and diagnosed separately.
-- **Fault isolation:** Network, API, and database issues can be investigated independently.
-- **Least privilege:** Components can receive only the permissions they require.
+The identity has the `Key Vault Secrets User` role at the vault scope.
 
-### Trade-offs
+The database password is retrieved from the secret named `retailapp-db-password`.
 
-Three-tier architecture introduces additional infrastructure cost, network dependencies, DNS configuration, and operational complexity.
+The server-side environment file contains configuration values. The database password is not stored in that file or in the application source code.
 
-Separating components does not automatically provide high availability. Redundancy, health checks, traffic distribution, backup and recovery, and tested failover are also necessary.
+### Network security
 
-## 4. Application Tier
+- Both VMs have no public IP address.
+- PostgreSQL public access is disabled.
+- Key Vault uses a firewall with default public network action set to deny.
+- The app subnet is permitted through a Key Vault service endpoint and VNet rule.
+- The app VM permits inbound TCP port `8080` from the web subnet.
+- SSH access uses keys.
+- The database connection uses SSL.
 
-The application VM runs a Python demo API as a systemd service.
+The Key Vault configuration uses a service endpoint and VNet rule, not a Private Endpoint.
 
-- Application directory: `/opt/ha-retail-api/`
-- Application source on the VM: `/opt/ha-retail-api/app.py`
-- systemd service: `ha-retail-api.service`
-- Application port: TCP `8080`
-- Health endpoint: `/health`
-- Product endpoint: `/api/products`
+## 4. Validation performed
 
-The health endpoint returns a healthy status, and the product endpoint returns demo product data.
+The following checks succeeded during deployment:
 
-The web VM has successfully accessed the API over the private network at `http://10.0.3.4:8080`.
-
-**Current limitation:** The demo API returns hardcoded products. It has not yet been connected to PostgreSQL, and its source and deployment procedure still need to be added to the Git repository for reproducible deployment.
-
-## 5. Network and Security Decisions
-
-### Network segmentation
-
-The web and application VMs occupy separate subnets. The application NSG allows TCP 8080 ingress from the web subnet (`10.0.2.0/24`).
-
-The intended web-to-application HTTP path has been tested successfully.
-
-### Managed identity and Azure Key Vault
-
-The application VM uses a system-assigned managed identity to authenticate to Key Vault without requiring a stored Azure service-principal secret.
-
-Verified configuration:
-
-- Azure RBAC authorization is enabled on the vault.
-- The application VM identity has the `Key Vault Secrets User` role at vault scope.
-- The Key Vault firewall default action is `Deny`.
-- The application subnet is allowed through a virtual network rule.
-- The `Microsoft.KeyVault` service endpoint is enabled on the application subnet.
-- Managed-identity secret retrieval succeeded without printing secret values.
-- The temporary `Key Vault Secrets Officer` role assignment used during setup was removed and verified absent.
-- No temporary public IP firewall rules remained in the final verification.
-- Purge protection is enabled on the vault.
-
-**Network design note:** Key Vault uses a public endpoint protected by firewall rules and a virtual network service endpoint. A Private Endpoint has not been deployed.
-
-The diagnostic tests confirm managed-identity access to Key Vault. The retail application has not yet been integrated with Key Vault for application-level secret retrieval.
-
-### PostgreSQL private connectivity
-
-PostgreSQL Flexible Server is deployed in UK South with public access disabled.
-
-Verified:
-
-- The database hostname resolves to its private IP from the application environment.
-- TCP port `5432` is reachable from the application VM.
-- The `retaildb` database exists.
-- The dedicated `retailapp` login can authenticate using the password retrieved from Key Vault.
-- A test table was successfully created and dropped in the `app` schema.
-
-The PostgreSQL administrator password was reset after temporary credential handling during setup. The application database login uses its separate password stored in Key Vault.
-
-The application API is not yet integrated with PostgreSQL.
-
-## 6. Infrastructure as Code
-
-Terraform configuration in `terraform-southindia/` manages the current South India infrastructure deployment.
-
-The repository also contains an earlier `terraform/` directory.
-
-Before running Terraform commands:
-
-1. Confirm the correct working directory.
-2. Confirm the Azure subscription and target resources.
-3. Review backend and state configuration.
-4. Run `terraform plan` and inspect the proposed changes.
-5. Apply only after verifying the plan.
-
-Do not assume the two Terraform directories share state or manage identical resources.
-
-## 7. Technology Stack
-
-| Area | Technology |
+| Test | Result |
 |---|---|
-| Cloud platform | Microsoft Azure |
-| Infrastructure as Code | Terraform |
-| Compute | Ubuntu 22.04 Linux VMs |
-| Web server | Nginx |
-| Application API | Python standard-library HTTP server |
-| Presentation hosting | Azure Static Web Apps |
-| Database | Azure Database for PostgreSQL Flexible Server |
-| Secrets management | Azure Key Vault |
-| Identity and authorization | Managed identity and Azure RBAC |
-| Network security | VNets, subnets, NSGs, service endpoints, VNet peering, private DNS |
-| Source control | Git and GitHub |
-| Delivery automation | GitHub Actions |
-| Troubleshooting | Azure CLI, Linux tools, HTTP, TCP, and SQL checks |
+| API health endpoint directly on app VM | HTTP 200 |
+| Database connection reported by health endpoint | Connected |
+| Storefront homepage through Nginx | HTTP 200 |
+| Health endpoint through Nginx | HTTP 200 |
+| Products API through Nginx | HTTP 200 |
+| Product data source | PostgreSQL |
+| Sample products returned | 3 |
+| Production API systemd service | Active and enabled |
+| Test API service on port 8081 | Stopped and disabled |
+| Nginx configuration test | Passed |
+| PostgreSQL private connectivity | Tested successfully |
 
-## 8. Validation Evidence
+Example product API response:
 
-| Validation | Result |
-|---|---|
-| Terraform deployment of documented infrastructure | Completed for deployed resources |
-| Nginx local HTTP response | HTTP 200 verified |
-| App VM to web VM HTTP request | HTTP 200 verified |
-| Web VM to application VM | Demo API HTTP response verified |
-| Application health endpoint | Healthy response verified |
-| Application product endpoint | Demo product JSON returned |
-| PostgreSQL hostname resolution | Private IP resolution verified |
-| Application VM to PostgreSQL TCP 5432 | Reachability verified |
-| PostgreSQL authentication using `retailapp` | Successful |
-| Database test table create/drop | Successful |
-| Application VM managed identity token acquisition | Verified |
-| Key Vault secret retrieval | Successful without printing secret values |
-| Key Vault firewall default-deny | Verified |
-| Temporary Key Vault Secrets Officer assignment cleanup | Verified |
-| Temporary Key Vault IP rule cleanup | Verified |
-| PostgreSQL administrator password reset | Completed |
-| Demo API integration with PostgreSQL | Pending |
-| Retail application integration with Key Vault | Pending |
-| Full storefront-to-database request flow | Pending |
-| Application Gateway and high-availability traffic distribution | Not implemented |
+```json
+{
+  "source": "postgresql",
+  "demo_data": true,
+  "products": [
+    {
+      "id": 1,
+      "name": "Everyday Backpack",
+      "price": 29.99
+    },
+    {
+      "id": 2,
+      "name": "Wireless Headphones",
+      "price": 49.99
+    },
+    {
+      "id": 3,
+      "name": "Insulated Water Bottle",
+      "price": 14.99
+    }
+  ]
+}
+```
 
-These checks validate individual infrastructure and service behaviors. They do not establish that the complete retail application is operational.
+`demo_data: true` indicates that the returned records are sample data stored in PostgreSQL.
 
-## 9. Current Limitations and Next Steps
+These tests demonstrate the application flow inside the configured private network. They do not prove public internet access or automatic failover.
 
-1. **Make API deployment reproducible:** Add the demo API source and deployment instructions to the repository.
-2. **Connect the API to PostgreSQL:** Replace hardcoded product data with database-backed operations.
-3. **Integrate Key Vault:** Retrieve the required application secret through managed identity without logging its value.
-4. **Validate application behavior:** Test the API against the database using the dedicated `retailapp` login.
-5. **Complete the retail request flow:** Demonstrate the storefront/web-to-application-to-database path.
-6. **Implement high availability:** Evaluate Application Gateway, backend redundancy, health probes, and failure handling.
-7. **Add monitoring and recovery:** Define alerts, backup requirements, recovery expectations, and operational checks.
-8. **Improve CI/CD:** Add automated application deployment and tests where appropriate.
-9. **Manage costs:** Review running resources and stop or deallocate eligible compute when it is not needed.
-
-## 10. Repository Structure
+## 5. Repository structure
 
 ```text
-ha-retail-project/
+.
 ├── .github/
 │   └── workflows/
+├── backend/
+│   ├── app.py
+│   └── requirements.txt
 ├── docs/
-│   ├── PROGRESS.md
 │   └── architecture-decisions.md
 ├── terraform/
 ├── terraform-southindia/
 ├── website/
+│   └── index.html
+├── .gitignore
 └── README.md
 ```
 
-The API currently deployed on the VM is not yet represented in this repository structure. Adding its source and deployment configuration is a planned improvement.
+There are Terraform configurations in two directories. Review the intended directory, variables, and state before running Terraform. Do not assume both directories represent the same deployment or share the same state.
 
-## 11. Cost and Security Considerations
+## 6. Running the Python dependencies locally
 
-- VM compute, managed database capacity, storage, and networking may incur charges.
-- Deallocated VMs can continue to incur disk and other resource charges.
-- A stopped database may continue to incur storage and related charges.
-- Keep SSH access restricted and use SSH keys.
-- Never commit credentials, secret values, private keys, or sensitive Terraform state.
-- Prefer managed identity and narrowly scoped RBAC permissions.
-- Do not print secrets in application logs or troubleshooting output.
-- Review Key Vault firewall rules and role assignments after security changes.
-- Rotate credentials promptly if they are exposed or temporarily staged.
-- Verify resource states before assuming that services have stopped.
+From the repository root:
 
-## 12. Project Summary
+```powershell
+python -m pip install -r .\backend\requirements.txt
+```
 
-This project establishes a three-tier Azure architecture with separate web and application subnets, a private cross-region PostgreSQL database, Terraform-managed infrastructure, and managed-identity-based Key Vault access.
+The API also requires Azure authentication, the expected environment variables, access to Key Vault, and network access to PostgreSQL.
 
-The demo API is running, web-to-application connectivity is verified, and database authentication and write operations have succeeded.
+Do not put real credentials in source files or commit local environment files.
 
-The remaining work is to connect the API to PostgreSQL, integrate application-level secret retrieval, make deployment reproducible from source control, and implement and test the redundancy and recovery measures required before claiming high availability.
+## 7. Known limitations
 
-Repository: https://github.com/varuganti-pavan-kumar/ha-retail-project
+This project currently demonstrates a working private three-tier application. It is not yet a production high-availability deployment.
+
+The following capabilities are not implemented or have not been demonstrated:
+
+- Multiple independent API instances.
+- Application Gateway or another load-balancing layer.
+- Automatic health-based failover.
+- Redundant application infrastructure.
+- A tested database backup and restore procedure.
+- Disaster recovery testing.
+- Complete monitoring and alerting.
+- Public internet access to the Nginx-hosted VM storefront.
+
+The project name includes HA, but high availability must not be considered achieved until redundancy and failover are implemented and tested.
+
+## 8. Possible future improvements
+
+1. Deploy multiple API instances.
+2. Add a load balancer and health probes.
+3. Implement and test database backup and restore.
+4. Add monitoring, logging, and alerts.
+5. Test application and database failure scenarios.
+6. Document recovery objectives and disaster recovery procedures.
+7. Review public ingress requirements and associated Azure costs.
+
+## 9. Cost awareness
+
+Azure virtual machines, PostgreSQL, disks, and networking resources can incur charges.
+
+Deallocating a VM can reduce compute charges, but disks and other resources may continue to incur costs. Review Azure billing and resource status before leaving the environment running.

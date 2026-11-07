@@ -1,4 +1,3 @@
-
 # Terraform working directory
 **/.terraform/*
 
@@ -23,3 +22,22 @@ override.tf.json
 # CLI configuration
 .terraformrc
 terraform.rc
+
+# Environment files and secrets
+.env
+.env.*
+!.env.example
+*.secret
+*.secrets
+
+# Private keys and certificates
+*.pem
+*.key
+id_rsa
+id_ed25519
+
+# Python generated files
+__pycache__/
+*.py[cod]
+.venv/
+venv/
