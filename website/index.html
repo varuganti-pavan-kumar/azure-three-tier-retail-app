@@ -1,36 +1,78 @@
-```html
 <!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="description" content="HA Retail - a cloud-powered online shopping demo">
   <title>HA Retail | Online Store</title>
   <style>
+    * {
+      box-sizing: border-box;
+    }
+
     body {
       font-family: Arial, sans-serif;
       margin: 0;
       background: #f4f6f8;
       color: #202938;
     }
+
     header {
       background: #16324f;
       color: white;
-      padding: 24px;
+      padding: 32px 20px;
       text-align: center;
     }
+
+    header h1 {
+      margin: 0 0 8px;
+    }
+
     main {
-      max-width: 850px;
+      max-width: 900px;
       margin: 40px auto;
-      padding: 24px;
+      padding: 28px;
       background: white;
       border-radius: 12px;
+      box-shadow: 0 4px 16px rgba(0, 0, 0, 0.06);
     }
+
+    .products {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+      gap: 18px;
+    }
+
     .product {
-      padding: 18px 0;
-      border-bottom: 1px solid #ddd;
+      padding: 20px;
+      border: 1px solid #e1e6eb;
+      border-radius: 10px;
     }
-    .price { color: #147d64; font-weight: bold; }
-    footer { text-align: center; padding: 24px; color: #586574; }
+
+    .product h3 {
+      margin-top: 0;
+    }
+
+    .price {
+      color: #147d64;
+      font-weight: bold;
+      font-size: 1.2rem;
+    }
+
+    #status {
+      color: #586574;
+      margin-bottom: 20px;
+    }
+
+    .error {
+      color: #b42318 !important;
+    }
+
+    footer {
+      text-align: center;
+      padding: 24px;
+      color: #586574;
+    }
   </style>
 </head>
 <body>
@@ -38,26 +80,68 @@
     <h1>HA Retail</h1>
     <p>A cloud-powered online shopping demo</p>
   </header>
+
   <main>
     <h2>Featured Products</h2>
-    <section class="product">
-      <h3>Everyday Backpack</h3>
-      <p>A practical bag for work and travel.</p>
-      <p class="price">£29.99</p>
-    </section>
-    <section class="product">
-      <h3>Wireless Headphones</h3>
-      <p>Enjoy your favourite music wherever you go.</p>
-      <p class="price">£49.99</p>
-    </section>
-    <section class="product">
-      <h3>Insulated Water Bottle</h3>
-      <p>Keep your drinks ready throughout the day.</p>
-      <p class="price">£14.99</p>
-    </section>
+    <p id="status" role="status">Loading products from our store...</p>
+    <section id="products" class="products" aria-live="polite"></section>
     <p><strong>Project:</strong> Azure cloud engineering portfolio demo.</p>
   </main>
-  <footer>HA Retail · Deployed automatically through GitHub Actions</footer>
+
+  <footer>HA Retail &copy; 2026 · Powered by Microsoft Azure</footer>
+
+  <script>
+    async function loadProducts() {
+      const status = document.getElementById("status");
+      const productList = document.getElementById("products");
+
+      try {
+        const response = await fetch("/api/products");
+
+        if (!response.ok) {
+          throw new Error(`API returned HTTP ${response.status}`);
+        }
+
+        const data = await response.json();
+
+        if (!Array.isArray(data.products)) {
+          throw new Error("Unexpected product data received");
+        }
+
+        productList.replaceChildren();
+
+        data.products.forEach(product => {
+          const card = document.createElement("article");
+          card.className = "product";
+
+          const name = document.createElement("h3");
+          name.textContent = product.name;
+
+          const description = document.createElement("p");
+          description.textContent = "Discover this featured HA Retail product.";
+
+          const price = document.createElement("p");
+          price.className = "price";
+          price.textContent = new Intl.NumberFormat("en-GB", {
+            style: "currency",
+            currency: "GBP"
+          }).format(product.price);
+
+          card.append(name, description, price);
+          productList.appendChild(card);
+        });
+
+        status.textContent = `${data.products.length} products loaded successfully.`;
+        status.classList.remove("error");
+
+      } catch (error) {
+        console.error("Unable to load products:", error);
+        status.textContent = "Sorry, products could not be loaded. Please try again later.";
+        status.classList.add("error");
+      }
+    }
+
+    loadProducts();
+  </script>
 </body>
 </html>
-```
